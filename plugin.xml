@@ -47,4 +47,13 @@
     </config-file>
     <framework src="libz.dylib" />
   </platform>
+
+  <platform name="wp8">
+    <config-file target="config.xml" parent="/*">
+    <feature name="Zip">
+        <param name="wp-package" value="UnZip"/>
+    </feature>
+    </config-file>
+    <source-file src="src/wp8/UnZip.cs" />
+  </platform>
 </plugin>
