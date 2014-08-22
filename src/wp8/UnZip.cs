@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.IsolatedStorage;
 using System.Linq;
+using System.Runtime.Serialization;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
@@ -11,18 +12,57 @@ using System.Windows.Resources;
 
 namespace WPCordovaClassLib.Cordova.Commands
 {
-    public class Unzip : BaseCommand 
+    public class UnZip : BaseCommand
     {
-        public void unzip(string options) 
+
+        /// <summary>
+        /// Represents a singular progress event to be passed back to javascript
+        /// </summary>
+        [DataContract]
+        public class FileUnzipProgress
         {
-            string[] optionStrings = JSON.JsonHelper.Deserialize<string[]>(options);
-            string srcFilePath = optionStrings[0];
-            string destPath = optionStrings[1];
-            string callbackId = optionStrings[2];
-            
+            /// <summary>
+            /// amount loaded
+            /// </summary>
+            [DataMember(Name = "loaded", IsRequired = true)]
+            public long Loaded { get; set; }
+            /// <summary>
+            /// Total
+            /// </summary>
+            [DataMember(Name = "total", IsRequired = false)]
+            public long Total { get; set; }
+
+            public FileUnzipProgress(long total = 0, long loaded = 0)
+            {
+                Loaded = loaded;
+                Total = total;
+            }
+        }
+
+        public void unzip(string options)
+        {
+            string[] optionStrings;
+            string srcFilePath;
+            string destPath = "";
+            string callbackId = CurrentCommandCallbackId;
+
+            try
+            {
+                optionStrings = JSON.JsonHelper.Deserialize<string[]>(options);
+                srcFilePath = optionStrings[0];
+                destPath = optionStrings[1];
+                callbackId = optionStrings[2];
+            }
+            catch (Exception)
+            {
+                DispatchCommandResult(new PluginResult(PluginResult.Status.JSON_EXCEPTION), callbackId);
+                return;
+            }
+
             using (IsolatedStorageFile appStorage = IsolatedStorageFile.GetUserStoreForApplication())
             {
-                // debug here to copy file from dll to isostore ...
+                // DEBUG here to copy file from dll to isostore ...
+                // this is only really needed if you want to test with a file in your package/project
                 StreamResourceInfo fileResourceStreamInfo = Application.GetResourceStream(new Uri(srcFilePath, UriKind.Relative));
                 if (fileResourceStreamInfo != null)
                 {
@@ -40,8 +80,19 @@ namespace WPCordovaClassLib.Cordova.Commands
                     }
                 }
 
-                IsolatedStorageFileStream zipStream = new IsolatedStorageFileStream(srcFilePath, FileMode.Open, FileAccess.Read, appStorage);
+                IsolatedStorageFileStream zipStream = null;
                 ZipArchive zipArch = null;
+
+                try
+                {
+                    zipStream = new IsolatedStorageFileStream(srcFilePath, FileMode.Open, FileAccess.Read, appStorage);
+                }
+                catch (Exception)
+                {
+                    Debug.WriteLine("File not found :: " + srcFilePath);
+                    DispatchCommandResult(new PluginResult(PluginResult.Status.ERROR), callbackId);
+                    return;
+                }
 
                 if (zipStream != null)
                 {
@@ -50,28 +101,47 @@ namespace WPCordovaClassLib.Cordova.Commands
 
                 if (zipArch != null)
                 {
-
-                    foreach (string filename in zipArch.FileNames)
+                    int totalFiles = zipArch.FileNames.Count();
+                    int current = 0;
+                    try
                     {
-                        Debug.WriteLine("upacking file : " + filename);
-                        string destFilePath = destPath + filename;
-                        string directoryName = getDirectoryName(destFilePath);
-                        if (!appStorage.DirectoryExists(directoryName))
+                        foreach (string filename in zipArch.FileNames)
                         {
-                            appStorage.CreateDirectory(directoryName);
-                        }
+                            
+                            string destFilePath = destPath + "/" + filename;
+                            string directoryName = getDirectoryName(destFilePath);
 
-                        using (Stream readStream = zipArch.GetFileStream(filename))
-                        {
-                            if (readStream != null)
+                            //Debug.WriteLine("upacking file : " + filename + " to : " + destFilePath);
+
+                            if (!appStorage.DirectoryExists(directoryName))
                             {
-                                using (FileStream outStream = new IsolatedStorageFileStream(destFilePath, FileMode.OpenOrCreate, FileAccess.Write, appStorage))
+                                appStorage.CreateDirectory(directoryName);
+                            }
+
+                           
+
+                            using (Stream readStream = zipArch.GetFileStream(filename))
+                            {
+                                if (readStream != null)
                                 {
-                                    WriteStreamToPath(readStream, outStream);
-                                    // DispatchFileTransferProgress(bytesRead, totalBytes, callbackId);
+                                    using (FileStream outStream = new IsolatedStorageFileStream(destFilePath, FileMode.OpenOrCreate, FileAccess.Write, appStorage))
+                                    {
+                                        WriteStreamToPath(readStream, outStream);
+                                        FileUnzipProgress progEvt = new FileUnzipProgress(totalFiles, current++);
+                                        PluginResult plugRes = new PluginResult(PluginResult.Status.OK, progEvt);
+                                        plugRes.KeepCallback = true;
+                                        plugRes.CallbackId = callbackId;
+                                        DispatchCommandResult(plugRes, callbackId);
+                                    }
                                 }
                             }
                         }
+                        DispatchCommandResult(new PluginResult(PluginResult.Status.OK), callbackId);
+                    }
+                    catch (Exception)
+                    {
+                        Debug.WriteLine("File not found :: " + srcFilePath);
+                        DispatchCommandResult(new PluginResult(PluginResult.Status.ERROR), callbackId);
                     }
                 }
             }
@@ -80,35 +150,35 @@ namespace WPCordovaClassLib.Cordova.Commands
         private void WriteStreamToPath(Stream readStream, Stream outStream)
         {
 
-                long totalBytes = readStream.Length;
-                int bytesRead = 0;
+            long totalBytes = readStream.Length;
+            int bytesRead = 0;
 
-                using (BinaryReader reader = new BinaryReader(readStream))
+            using (BinaryReader reader = new BinaryReader(readStream))
+            {
+                using (BinaryWriter writer = new BinaryWriter(outStream))
                 {
-                    using (BinaryWriter writer = new BinaryWriter(outStream))
-                    {
-                        int BUFFER_SIZE = 1024;
-                        byte[] buffer;
+                    int BUFFER_SIZE = 1024;
+                    byte[] buffer;
 
-                        while (true)
+                    while (true)
+                    {
+                        buffer = reader.ReadBytes(BUFFER_SIZE);
+                        bytesRead += buffer.Length;
+                        if (buffer.Length > 0)
                         {
-                            buffer = reader.ReadBytes(BUFFER_SIZE);
-                            bytesRead += buffer.Length;
-                            if (buffer.Length > 0)
-                            {
-                                writer.Write(buffer);
-                            }
-                            else
-                            {
-                                writer.Close();
-                                reader.Close();
-                                outStream.Close();
-                                break;
-                            }
+                            writer.Write(buffer);
+                        }
+                        else
+                        {
+                            writer.Close();
+                            reader.Close();
+                            outStream.Close();
+                            break;
                         }
                     }
                 }
-           
+            }
+
         }
 
         // Gets the full path without the filename
@@ -160,7 +230,7 @@ namespace WPCordovaClassLib.Cordova.Commands
                 }
             }
 
-            public List<ZipArchiveEntry> FileEntries 
+            public List<ZipArchiveEntry> FileEntries
             {
                 get
                 {
@@ -203,7 +273,7 @@ namespace WPCordovaClassLib.Cordova.Commands
                 get
                 {
                     return (from entry in FileEntries
-                            where (!entry.Filename.EndsWith("/") && 
+                            where (!entry.Filename.EndsWith("/") &&
                                    !entry.Filename.StartsWith("__MACOSX/"))
                             select entry.Filename);
                 }
@@ -217,56 +287,56 @@ namespace WPCordovaClassLib.Cordova.Commands
                 get
                 {
                     return (from entry in FileEntries
-                            where (entry.Filename.EndsWith("/") 
+                            where (entry.Filename.EndsWith("/")
                                    && !entry.Filename.StartsWith("__MACOSX/"))
                             select entry.Filename);
                 }
             }
 
-    /***************************************************
-        4.3.16  End of central directory record:
+            /***************************************************
+                4.3.16  End of central directory record:
 
-        end of central dir signature    4 bytes  (0x06054b50)
-        number of this disk             2 bytes
-        number of the disk with the
-        start of the central directory  2 bytes
-        total number of entries in the
-        central directory on this disk  2 bytes
-        total number of entries in
-        the central directory           2 bytes
-        size of the central directory   4 bytes
-        offset of start of central
-        directory with respect to
-        the starting disk number        4 bytes
-        .ZIP file comment length        2 bytes
-        .ZIP file comment       (variable size)
-    */
+                end of central dir signature    4 bytes  (0x06054b50)
+                number of this disk             2 bytes
+                number of the disk with the
+                start of the central directory  2 bytes
+                total number of entries in the
+                central directory on this disk  2 bytes
+                total number of entries in
+                the central directory           2 bytes
+                size of the central directory   4 bytes
+                offset of start of central
+                directory with respect to
+                the starting disk number        4 bytes
+                .ZIP file comment length        2 bytes
+                .ZIP file comment       (variable size)
+            */
 
-    /***************************************************
-    File header:
+            /***************************************************
+            File header:
 
-        central file header signature   4 bytes  (0x02014b50)
-        version made by                 2 bytes
-        version needed to extract       2 bytes
-        general purpose bit flag        2 bytes
-        compression method              2 bytes
-        last mod file time              2 bytes
-        last mod file date              2 bytes
-        crc-32                          4 bytes
-        compressed size                 4 bytes
-        uncompressed size               4 bytes
-        file name length                2 bytes
-        extra field length              2 bytes
-        file comment length             2 bytes
-        disk number start               2 bytes
-        internal file attributes        2 bytes
-        external file attributes        4 bytes
-        relative offset of local header 4 bytes
+                central file header signature   4 bytes  (0x02014b50)
+                version made by                 2 bytes
+                version needed to extract       2 bytes
+                general purpose bit flag        2 bytes
+                compression method              2 bytes
+                last mod file time              2 bytes
+                last mod file date              2 bytes
+                crc-32                          4 bytes
+                compressed size                 4 bytes
+                uncompressed size               4 bytes
+                file name length                2 bytes
+                extra field length              2 bytes
+                file comment length             2 bytes
+                disk number start               2 bytes
+                internal file attributes        2 bytes
+                external file attributes        4 bytes
+                relative offset of local header 4 bytes
 
-        file name (variable size)
-        extra field (variable size)
-        file comment (variable size)
-    */
+                file name (variable size)
+                extra field (variable size)
+                file comment (variable size)
+            */
 
 
             private List<ZipArchiveEntry> InflateDirectory()
@@ -274,7 +344,7 @@ namespace WPCordovaClassLib.Cordova.Commands
                 _fileEntries = new List<ZipArchiveEntry>();
 
                 BinaryReader reader = new BinaryReader(ZipStream);
-                
+
                 reader.BaseStream.Seek(-4, SeekOrigin.End);
                 // skip back
                 while (reader.ReadInt32() != END_CENTRAL_DIR_SIG)
@@ -297,7 +367,7 @@ namespace WPCordovaClassLib.Cordova.Commands
 
                         reader.BaseStream.Seek(4, SeekOrigin.Current);
                         short flags = reader.ReadInt16();   // read general purpose bit flag
-                          
+
                         if ((flags & 8) > 0) //Silverlight doesn't like this format. We'll "fix it" further below
                         {
                             doRebuild = true;
@@ -332,7 +402,7 @@ namespace WPCordovaClassLib.Cordova.Commands
                     RebuildEntries(ref reader, ref writer);
 
                     // rewind
-                    reader.BaseStream.Seek(directoryStart, SeekOrigin.Begin);  
+                    reader.BaseStream.Seek(directoryStart, SeekOrigin.Begin);
                     //Rebuild directory
                     RebuildDirectory(ref reader, ref writer);
 
@@ -348,7 +418,7 @@ namespace WPCordovaClassLib.Cordova.Commands
                 {
                     writer.Write(reader.ReadBytes(8));
                     byte flag = reader.ReadByte();
-                    writer.Write((byte)(247 & flag)); //set 3rd bit to 0 to indicate the new format
+                    writer.Write((byte)(0xF7 & flag)); //set 3rd hobbit to 0 for new format
                     writer.Write(reader.ReadBytes(19));
                     short filenamelength = reader.ReadInt16();
                     writer.Write(filenamelength);
@@ -374,7 +444,7 @@ namespace WPCordovaClassLib.Cordova.Commands
                     writer.Write(reader.ReadBytes(6));
 
                     short flag = reader.ReadInt16();
-                    writer.Write((short)(0xF7 & flag)); //set 3rd bit to 0 to indicate the new format
+                    writer.Write((short)(0xF7 & flag)); //set 3rd hobbit to 0 for new format
                     writer.Write(reader.ReadBytes(6));
                     writer.Write(entry.CRC32);
                     writer.Write(entry.CompressedLength);
